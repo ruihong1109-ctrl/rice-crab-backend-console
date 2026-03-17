@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>稻蟹共生后端控制台</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 24px; }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+    .card { background: #111827; border: 1px solid #334155; border-radius: 16px; padding: 16px; }
+    .span-4 { grid-column: span 4; }
+    .span-6 { grid-column: span 6; }
+    .span-8 { grid-column: span 8; }
+    .span-12 { grid-column: span 12; }
+    h1, h2, h3 { margin-top: 0; }
+    .metric { font-size: 28px; font-weight: bold; }
+    .muted { color: #94a3b8; }
+    .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 12px; }
+    .low { background: rgba(34,197,94,.15); color: #4ade80; }
+    .medium { background: rgba(234,179,8,.15); color: #facc15; }
+    .high { background: rgba(249,115,22,.15); color: #fb923c; }
+    .critical { background: rgba(239,68,68,.15); color: #f87171; }
+    button { background: #2563eb; color: #fff; border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; }
+    button.secondary { background: #475569; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #020617; padding: 12px; border-radius: 12px; max-height: 320px; overflow: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #334155; }
+    .row { display: flex; justify-content: space-between; margin: 6px 0; }
+    .tiny { font-size: 12px; }
+    @media (max-width: 960px) {
+      .span-4, .span-6, .span-8, .span-12 { grid-column: span 12; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>稻蟹共生后端控制台</h1>
+    <p class="muted">这个页面直接调用 FastAPI 接口，并通过 WebSocket 接收实时推送，用于与 cockpit 前端联调和展示后端控制能力。</p>
+
+    <div class="grid">
+      <div class="card span-4">
+        <h3>全局概览</h3>
+        <div class="row"><span>田块数量</span><span id="plotCount" class="metric">0</span></div>
+        <div class="row"><span>设备数量</span><span id="deviceCount" class="metric">0</span></div>
+        <div class="row"><span>在线设备</span><span id="onlineCount" class="metric">0</span></div>
+        <div class="row"><span>未关闭告警</span><span id="alarmCount" class="metric">0</span></div>
+      </div>
+
+      <div class="card span-4">
+        <h3>当前田块水质</h3>
+        <div class="row"><span>水温</span><span id="waterTemp">-</span></div>
+        <div class="row"><span>溶氧</span><span id="doVal">-</span></div>
+        <div class="row"><span>pH</span><span id="phVal">-</span></div>
+        <div class="row"><span>氨氮</span><span id="ammoniaVal">-</span></div>
+        <div class="row"><span>水位</span><span id="waterLevel">-</span></div>
+      </div>
+
+      <div class="card span-4">
+        <h3>风险状态</h3>
+        <p><span id="riskBadge" class="badge low">low</span></p>
+        <p id="stateSummary">-</p>
+        <div id="recommendations"></div>
+      </div>
+
+      <div class="card span-8">
+        <h3>设备与控制</h3>
+        <div class="actions">
+          <button onclick="sendAeration(0)">关闭增氧</button>
+          <button onclick="sendAeration(1)">增氧 1 档</button>
+          <button onclick="sendAeration(2)">增氧 2 档</button>
+          <button onclick="sendAeration(3)">增氧 3 档</button>
+          <button class="secondary" onclick="setFeeding(2)">投喂降为 2</button>
+          <button class="secondary" onclick="setFeeding(4)">投喂升为 4</button>
+          <button class="secondary" onclick="setPump(true)">开启排灌</button>
+          <button class="secondary" onclick="setPump(false)">关闭排灌</button>
+        </div>
+        <table id="devicesTable">
+          <thead>
+            <tr><th>设备</th><th>类型</th><th>状态</th><th>上报</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card span-4">
+        <h3>最近告警</h3>
+        <div id="alarms"></div>
+      </div>
+
+      <div class="card span-6">
+        <h3>最近指令</h3>
+        <pre id="commandsLog">暂无</pre>
+      </div>
+
+      <div class="card span-6">
+        <h3>实时消息流</h3>
+        <pre id="wsLog">等待 WebSocket 消息...</pre>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const plotId = 'plot-a-01';
+    const commandLog = [];
+    const wsEvents = [];
+
+    function prettyJson(value) {
+      return JSON.stringify(value, null, 2);
+    }
+
+    function riskClass(level) {
+      return ['low', 'medium', 'high', 'critical'].includes(level) ? level : 'low';
+    }
+
+    function renderSummary(data) {
+      document.getElementById('plotCount').textContent = data.plot_count;
+      document.getElementById('deviceCount').textContent = data.device_count;
+      document.getElementById('onlineCount').textContent = data.online_device_count;
+      document.getElementById('alarmCount').textContent = data.open_alarm_count;
+    }
+
+    function renderPlot(payload) {
+      const plot = payload.plot;
+      document.getElementById('waterTemp').textContent = plot.water_temp.toFixed(2) + ' °C';
+      document.getElementById('doVal').textContent = plot.dissolved_oxygen.toFixed(2) + ' mg/L';
+      document.getElementById('phVal').textContent = plot.ph.toFixed(2);
+      document.getElementById('ammoniaVal').textContent = plot.ammonia_n.toFixed(3) + ' mg/L';
+      document.getElementById('waterLevel').textContent = plot.water_level.toFixed(2) + ' cm';
+
+      const badge = document.getElementById('riskBadge');
+      badge.textContent = plot.risk_level;
+      badge.className = 'badge ' + riskClass(plot.risk_level);
+      document.getElementById('stateSummary').textContent = plot.state_summary;
+      document.getElementById('recommendations').innerHTML = plot.recommendation.map(x => `<div class="tiny">• ${x}</div>`).join('');
+
+      const tbody = document.querySelector('#devicesTable tbody');
+      tbody.innerHTML = payload.devices.map(d => `
+        <tr>
+          <td>${d.name}</td>
+          <td>${d.device_type}</td>
+          <td>${d.online ? 'online' : 'offline'}</td>
+          <td><span class="tiny">${escapeHtml(JSON.stringify(d.reported_state))}</span></td>
+        </tr>`).join('');
+
+      const alarmsEl = document.getElementById('alarms');
+      alarmsEl.innerHTML = payload.latest_alarms.length
+        ? payload.latest_alarms.map(a => `<div style="margin-bottom:10px"><span class="badge ${riskClass(mapSeverity(a.severity))}">${a.severity}</span> ${a.title}<div class="tiny muted">${a.created_at}</div></div>`).join('')
+        : '<div class="muted tiny">暂无告警</div>';
+    }
+
+    function mapSeverity(sev) {
+      if (sev === 'critical') return 'critical';
+      if (sev === 'major') return 'high';
+      if (sev === 'warn') return 'medium';
+      return 'low';
+    }
+
+    function escapeHtml(text) {
+      return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+    }
+
+    async function loadInitial() {
+      const summary = await fetch('/api/v1/cockpit/summary').then(r => r.json());
+      renderSummary(summary);
+      const plot = await fetch(`/api/v1/plots/${plotId}`).then(r => r.json());
+      renderPlot(plot);
+    }
+
+    async function sendCommand(deviceId, commandType, desiredState, reason) {
+      const body = {
+        plot_id: plotId,
+        device_id: deviceId,
+        command_type: commandType,
+        desired_state: desiredState,
+        source: 'console-page',
+        reason
+      };
+      const res = await fetch('/api/v1/commands', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)
+      }).then(r => r.json());
+      commandLog.unshift(res);
+      document.getElementById('commandsLog').textContent = prettyJson(commandLog.slice(0, 8));
+    }
+
+    function sendAeration(level) {
+      sendCommand('dev-aerator-001', 'SET_AERATION_LEVEL', { level }, 'manual control from console');
+    }
+
+    function setFeeding(feeding_index) {
+      sendCommand('dev-feeder-001', 'SET_FEEDING_INDEX', { feeding_index }, 'manual feeding adjustment');
+    }
+
+    function setPump(pump_on) {
+      sendCommand('dev-pump-001', 'SET_PUMP_STATE', { pump_on }, 'manual drainage control');
+    }
+
+    function connectWs() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${location.host}/ws/cockpit`);
+      ws.onopen = () => {
+        ws.send('hello');
+      };
+      ws.onmessage = evt => {
+        const msg = JSON.parse(evt.data);
+        wsEvents.unshift(msg);
+        document.getElementById('wsLog').textContent = prettyJson(wsEvents.slice(0, 12));
+        if (msg.type === 'snapshot') {
+          renderSummary(msg.payload.summary);
+          if (msg.payload.plots && msg.payload.plots[0]) renderPlot(msg.payload.plots[0]);
+        }
+        if (msg.type === 'summary_update') renderSummary(msg.payload);
+        if (msg.type === 'plot_update') renderPlot(msg.payload);
+        if (msg.type === 'command_created' || msg.type === 'command_dispatched' || msg.type === 'command_ack') {
+          commandLog.unshift(msg.payload);
+          document.getElementById('commandsLog').textContent = prettyJson(commandLog.slice(0, 8));
+        }
+      };
+      ws.onclose = () => {
+        setTimeout(connectWs, 1000);
+      };
+    }
+
+    loadInitial();
+    connectWs();
+  </script>
+</body>
+</html>
