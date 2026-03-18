@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +22,29 @@ from pydantic import BaseModel, Field
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = APP_DIR.parent
 STATIC_DIR = PROJECT_DIR / "static"
+
+# March simulation profile for Panjin, Liaoning.
+# This backend intentionally simulates a preseason / thawing-field state rather than
+# a summer production state, because rice sowing in Northeast China usually starts in
+# mid-April and transplanting generally occurs from mid-May to early June.
+
+PLOT_ID = "plot-a-01"
+
+INITIAL_METRICS = {
+    "water_temp": 2.4,
+    "dissolved_oxygen": 10.3,
+    "ph": 7.05,
+    "ammonia_n": 0.035,
+    "water_level": 8.5,
+}
+
+SAFE_RANGES = {
+    "water_temp": (-0.5, 6.5),
+    "dissolved_oxygen": (8.2, 12.5),
+    "ph": (6.7, 7.6),
+    "ammonia_n": (0.01, 0.10),
+    "water_level": (4.0, 15.5),
+}
 
 
 def now_iso() -> str:
@@ -63,6 +87,8 @@ class PlotState:
     rice_variety: str
     crab_variety: str
     location: str
+    scenario_month: str
+    phenology_stage: str
     water_temp: float
     dissolved_oxygen: float
     ph: float
@@ -91,22 +117,28 @@ class MemoryStore:
 
     def _init_demo_data(self) -> None:
         plot = PlotState(
-            plot_id="plot-a-01",
+            plot_id=PLOT_ID,
             name="平安镇一号示范田",
             area_mu=500.0,
             rice_variety="红海滩1号",
             crab_variety="光合1号",
             location="辽宁盘锦平安镇",
-            water_temp=27.8,
-            dissolved_oxygen=5.9,
-            ph=7.3,
-            ammonia_n=0.21,
-            water_level=28.0,
-            feeding_index=3,
-            aeration_level=1,
+            scenario_month="3月",
+            phenology_stage="备耕监测期",
+            water_temp=INITIAL_METRICS["water_temp"],
+            dissolved_oxygen=INITIAL_METRICS["dissolved_oxygen"],
+            ph=INITIAL_METRICS["ph"],
+            ammonia_n=INITIAL_METRICS["ammonia_n"],
+            water_level=INITIAL_METRICS["water_level"],
+            feeding_index=0,
+            aeration_level=0,
             pump_on=False,
-            recommendation=["当前建议保持常规投喂", "继续观察午后溶氧变化"],
+            recommendation=[
+                "当前处于东北地区三月备耕期，以保水、巡检和融冻观测为主",
+                "暂不建议常规投喂，优先关注低温回落和水位波动",
+            ],
         )
+        recompute_plot_state(plot)
         self.plots[plot.plot_id] = plot
 
         devices = [
@@ -130,18 +162,25 @@ class MemoryStore:
                 },
             ),
             DeviceState(
+                device_id="dev-weather-001",
+                device_type="sensor",
+                plot_id=plot.plot_id,
+                name="微气象站",
+                reported_state={"air_temp": 2.6, "wind_level": "light", "weather": "晴冷"},
+            ),
+            DeviceState(
                 device_id="dev-aerator-001",
                 device_type="actuator",
                 plot_id=plot.plot_id,
                 name="增氧机",
-                reported_state={"level": plot.aeration_level, "power": "on"},
+                reported_state={"level": plot.aeration_level, "power": "off"},
             ),
             DeviceState(
                 device_id="dev-feeder-001",
                 device_type="actuator",
                 plot_id=plot.plot_id,
                 name="智能投喂器",
-                reported_state={"feeding_index": plot.feeding_index, "power": "on"},
+                reported_state={"feeding_index": plot.feeding_index, "power": "off", "mode": "standby"},
             ),
             DeviceState(
                 device_id="dev-pump-001",
@@ -164,6 +203,7 @@ class MemoryStore:
             "ammonia_n": round(plot.ammonia_n, 3),
             "water_level": round(plot.water_level, 2),
             "risk_level": plot.risk_level,
+            "phenology_stage": plot.phenology_stage,
         }
         self.telemetry_history[plot.plot_id].append(item)
 
@@ -180,6 +220,7 @@ class MemoryStore:
             "open_alarm_count": sum(1 for a in self.alarms if a["status"] == "open"),
             "risk_counts": risk_counts,
             "latest_alarm": latest_alarm,
+            "season_profile": "东北三月备耕仿真",
         }
 
     def build_plot_payload(self, plot_id: str) -> dict[str, Any]:
@@ -207,6 +248,10 @@ class MemoryStore:
                 "ph": round(plot.ph, 2),
                 "ammonia_n": round(plot.ammonia_n, 3),
                 "water_level": round(plot.water_level, 2),
+            },
+            "season_meta": {
+                "scenario_month": plot.scenario_month,
+                "phenology_stage": plot.phenology_stage,
             },
         }
 
@@ -270,12 +315,17 @@ class MemoryStore:
 
         if command_type == "SET_AERATION_LEVEL":
             level = int(desired.get("level", plot.aeration_level))
-            plot.aeration_level = max(0, min(3, level))
+            plot.aeration_level = max(0, min(2, level))
             device.reported_state = {"level": plot.aeration_level, "power": "on" if plot.aeration_level > 0 else "off"}
         elif command_type == "SET_FEEDING_INDEX":
             feeding_index = int(desired.get("feeding_index", plot.feeding_index))
-            plot.feeding_index = max(0, min(5, feeding_index))
-            device.reported_state = {"feeding_index": plot.feeding_index, "power": "on"}
+            # March preseason: feeder stays in standby even if an operator tries to raise it.
+            plot.feeding_index = max(0, min(1, feeding_index))
+            device.reported_state = {
+                "feeding_index": plot.feeding_index,
+                "power": "off" if plot.feeding_index == 0 else "standby",
+                "mode": "preseason",
+            }
         elif command_type == "SET_PUMP_STATE":
             pump_on = bool(desired.get("pump_on", plot.pump_on))
             plot.pump_on = pump_on
@@ -303,7 +353,7 @@ def get_allowed_origins() -> list[str]:
 allowed_origins = get_allowed_origins()
 allow_credentials = allowed_origins != ["*"]
 
-app = FastAPI(title="Rice Crab Backend Console", version="0.2.0")
+app = FastAPI(title="Rice Crab Backend Console", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -335,7 +385,7 @@ async def startup_event() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def root() -> str:
-    return '<html><body style="font-family: Arial; padding: 24px"><h2>稻蟹共生后端控制台</h2><p>接口文档：<a href="/docs">/docs</a></p><p>控制台页面：<a href="/console">/console</a></p><p>健康检查：<a href="/api/v1/health">/api/v1/health</a></p></body></html>'
+    return '<html><body style="font-family: Arial; padding: 24px"><h2>稻蟹共生后端控制台</h2><p>当前载入：东北三月备耕仿真数据</p><p>接口文档：<a href="/docs">/docs</a></p><p>控制台页面：<a href="/console">/console</a></p><p>健康检查：<a href="/api/v1/health">/api/v1/health</a></p></body></html>'
 
 
 @app.get("/console", response_class=HTMLResponse)
@@ -353,6 +403,7 @@ async def health_check() -> dict[str, Any]:
         "generated_at": now_iso(),
         "plot_count": len(store.plots),
         "device_count": len(store.devices),
+        "season_profile": "northeast-china-march-preseason",
     }
 
 
@@ -520,31 +571,38 @@ async def simulation_loop() -> None:
 
 
 def evolve_plot(plot: PlotState) -> None:
+    # Accelerated diurnal cycle for demo: roughly one virtual day every 4 minutes.
     clock = datetime.now(timezone.utc).astimezone()
-    minute = clock.minute + clock.second / 60.0
-    diurnal = math.sin((minute / 60.0) * 2 * math.pi)
+    day_fraction = ((clock.minute % 4) * 60 + clock.second) / 240.0
+    diurnal = math.sin(day_fraction * 2 * math.pi - math.pi / 2)
 
     if not plot.manual_override:
-        plot.water_temp += 0.10 * diurnal + random.uniform(-0.12, 0.12)
-        do_change = random.uniform(-0.18, 0.12)
-        do_change += -0.25 * max(plot.feeding_index - 3, 0)
-        do_change += 0.40 * plot.aeration_level
-        plot.dissolved_oxygen += do_change / 5
-        plot.ph += random.uniform(-0.04, 0.04)
-        plot.ammonia_n += random.uniform(-0.01, 0.018) + 0.01 * max(plot.feeding_index - 3, 0)
-        plot.water_level += random.uniform(-0.25, 0.25) + (0.35 if plot.pump_on else 0.0)
-    else:
-        plot.water_temp += random.uniform(-0.05, 0.05)
-        plot.dissolved_oxygen += random.uniform(-0.08, 0.08)
-        plot.ph += random.uniform(-0.02, 0.02)
-        plot.ammonia_n += random.uniform(-0.005, 0.005)
-        plot.water_level += random.uniform(-0.1, 0.1)
+        # In March, shallow thawing water warms slowly in the daytime and cools at night.
+        plot.water_temp += 0.10 * diurnal + random.uniform(-0.03, 0.03)
 
-    plot.water_temp = clamp(plot.water_temp, 22.0, 34.0)
-    plot.dissolved_oxygen = clamp(plot.dissolved_oxygen, 2.8, 9.5)
-    plot.ph = clamp(plot.ph, 6.5, 8.5)
-    plot.ammonia_n = clamp(plot.ammonia_n, 0.05, 0.8)
-    plot.water_level = clamp(plot.water_level, 15.0, 45.0)
+        # Cold water naturally holds more oxygen; aeration adds little, while wind and meltwater matter more.
+        do_change = 0.08 * (-diurnal) + random.uniform(-0.05, 0.05)
+        do_change += 0.06 * plot.aeration_level
+        do_change -= 0.03 * plot.feeding_index
+        plot.dissolved_oxygen += do_change
+
+        plot.ph += random.uniform(-0.015, 0.015)
+        plot.ammonia_n += random.uniform(-0.004, 0.004) + 0.006 * plot.feeding_index
+
+        # Pump mainly affects preseason shallow water depth.
+        plot.water_level += random.uniform(-0.15, 0.18) - (0.35 if plot.pump_on else 0.0)
+    else:
+        plot.water_temp += random.uniform(-0.02, 0.02)
+        plot.dissolved_oxygen += random.uniform(-0.03, 0.03)
+        plot.ph += random.uniform(-0.01, 0.01)
+        plot.ammonia_n += random.uniform(-0.002, 0.002)
+        plot.water_level += random.uniform(-0.05, 0.05)
+
+    plot.water_temp = clamp(plot.water_temp, *SAFE_RANGES["water_temp"])
+    plot.dissolved_oxygen = clamp(plot.dissolved_oxygen, *SAFE_RANGES["dissolved_oxygen"])
+    plot.ph = clamp(plot.ph, *SAFE_RANGES["ph"])
+    plot.ammonia_n = clamp(plot.ammonia_n, *SAFE_RANGES["ammonia_n"])
+    plot.water_level = clamp(plot.water_level, *SAFE_RANGES["water_level"])
     plot.updated_at = now_iso()
 
 
@@ -554,25 +612,25 @@ async def maybe_emit_alarm(plot: PlotState) -> None:
     title = ""
     detail: dict[str, Any] = {}
 
-    if plot.dissolved_oxygen < 4.8:
-        should_alarm = True
-        severity = "critical" if plot.dissolved_oxygen < 4.0 else "major"
-        title = "田块溶氧偏低"
-        detail = {"dissolved_oxygen": round(plot.dissolved_oxygen, 2), "water_temp": round(plot.water_temp, 2)}
-    elif plot.ammonia_n > 0.45:
+    if plot.water_temp < 0.8:
         should_alarm = True
         severity = "major"
-        title = "氨氮升高"
-        detail = {"ammonia_n": round(plot.ammonia_n, 3)}
-    elif plot.water_level > 39:
+        title = "低温回落风险"
+        detail = {"water_temp": round(plot.water_temp, 2), "phenology_stage": plot.phenology_stage}
+    elif plot.water_level > 14.5:
         should_alarm = True
         severity = "warn"
-        title = "水位偏高"
+        title = "融雪回水偏高"
         detail = {"water_level": round(plot.water_level, 2)}
+    elif plot.ph < 6.8 or plot.ph > 7.5:
+        should_alarm = True
+        severity = "warn"
+        title = "pH 波动超出预期"
+        detail = {"ph": round(plot.ph, 2)}
 
     if should_alarm:
         recent_same = [a for a in reversed(store.alarms) if a["plot_id"] == plot.plot_id and a["title"] == title]
-        if not recent_same or len(recent_same) > 0 and recent_same[0]["status"] != "open":
+        if not recent_same or recent_same[0]["status"] != "open":
             store.create_alarm(plot, severity, title, detail)
             await broadcast("alarm_created", store.alarms[-1])
 
@@ -581,35 +639,33 @@ def recompute_plot_state(plot: PlotState) -> None:
     recommendations: list[str] = []
     risk_level = "low"
     limiting_factor = "stable"
-    state_summary = "水质稳定，适合常规管理"
+    state_summary = "三月备耕期，水体总体平稳，以融冻观测和保水巡检为主"
 
-    if plot.dissolved_oxygen < 4.0:
-        risk_level = "critical"
-        limiting_factor = "dissolved_oxygen"
-        state_summary = "溶氧处于危险区间，河蟹应激风险高"
-        recommendations = ["立即提升增氧等级", "暂停高强度投喂", "15分钟后复测溶氧"]
-    elif plot.dissolved_oxygen < 5.2:
+    if plot.water_temp < 0.8:
         risk_level = "high"
-        limiting_factor = "dissolved_oxygen"
-        state_summary = "溶氧偏低，系统建议先稳住水体承载"
-        recommendations = ["适度提升增氧等级", "将投喂指数下调一级", "加强午后巡检"]
-    elif plot.ammonia_n > 0.45:
-        risk_level = "high"
-        limiting_factor = "ammonia_n"
-        state_summary = "氨氮偏高，水质压力上升"
-        recommendations = ["开启换水或排灌", "降低投喂负荷", "连续观察两轮采样"]
-    elif plot.water_temp > 30.5:
-        risk_level = "medium"
         limiting_factor = "water_temp"
-        state_summary = "高温阶段来临，需关注水质波动"
-        recommendations = ["提前预增氧", "降低中午投喂强度", "关注夜间溶氧变化"]
-    elif plot.water_level > 39:
+        state_summary = "低温明显，田面可能出现回冻，不宜进入种养作业"
+        recommendations = ["保持浅水稳温", "暂停无必要操作", "关注夜间低温和次日回升情况"]
+    elif plot.water_level > 14.5:
         risk_level = "medium"
         limiting_factor = "water_level"
-        state_summary = "水位偏高，需防范田块承载压力变化"
-        recommendations = ["排查排灌状态", "关注连续降雨影响"]
+        state_summary = "融雪回水偏高，需防止田面过深积水影响备耕"
+        recommendations = ["视情况开启排灌泵", "检查沟渠畅通", "连续观察 1 至 2 个周期"]
+    elif plot.ph < 6.8 or plot.ph > 7.5:
+        risk_level = "medium"
+        limiting_factor = "ph"
+        state_summary = "早春阶段水体化学性状出现波动，建议继续监测"
+        recommendations = ["核查传感器状态", "减少额外扰动", "等待下一轮采样复核"]
+    elif plot.feeding_index > 0:
+        risk_level = "medium"
+        limiting_factor = "feeding_plan"
+        state_summary = "当前处于备耕监测期，不建议执行常规投喂"
+        recommendations = ["将投喂指数调回 0", "保持设备待机", "以水位与低温监测为主"]
     else:
-        recommendations = ["当前建议保持常规投喂", "继续观察午后溶氧变化"]
+        recommendations = [
+            "当前以保水、巡田和设备巡检为主",
+            "东北地区三月尚未进入正式插秧与放苗阶段",
+        ]
 
     plot.risk_level = risk_level
     plot.limiting_factor = limiting_factor
@@ -631,10 +687,21 @@ def sync_devices_from_plot(plot: PlotState) -> None:
                 "ammonia_n": round(plot.ammonia_n, 3),
                 "water_level": round(plot.water_level, 2),
             }
+        elif device.device_id == "dev-weather-001":
+            air_temp = round(plot.water_temp + random.uniform(-1.8, 2.2), 1)
+            device.reported_state = {
+                "air_temp": air_temp,
+                "wind_level": "light" if air_temp < 5 else "gentle",
+                "weather": "晴冷" if air_temp < 4 else "晴",
+            }
         elif device.device_id == "dev-aerator-001":
             device.reported_state = {"level": plot.aeration_level, "power": "on" if plot.aeration_level > 0 else "off"}
         elif device.device_id == "dev-feeder-001":
-            device.reported_state = {"feeding_index": plot.feeding_index, "power": "on"}
+            device.reported_state = {
+                "feeding_index": plot.feeding_index,
+                "power": "off" if plot.feeding_index == 0 else "standby",
+                "mode": "preseason",
+            }
         elif device.device_id == "dev-pump-001":
             device.reported_state = {"pump_on": plot.pump_on}
         device.updated_at = now_iso()
