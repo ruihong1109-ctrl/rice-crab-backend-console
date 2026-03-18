@@ -104,6 +104,45 @@ class PlotState:
     recommendation: list[str] = field(default_factory=list)
     updated_at: str = field(default_factory=now_iso)
 
+def recompute_plot_state(plot: PlotState) -> None:
+    recommendations: list[str] = []
+    risk_level = "low"
+    limiting_factor = "stable"
+    state_summary = "三月备耕期，水体总体平稳，以融冻观测和保水巡检为主"
+
+    if plot.water_temp < 0.8:
+        risk_level = "high"
+        limiting_factor = "water_temp"
+        state_summary = "低温明显，田面可能出现回冻，不宜进入种养作业"
+        recommendations = ["保持浅水稳温", "暂停无必要操作", "关注夜间低温和次日回升情况"]
+    elif plot.water_level > 14.5:
+        risk_level = "medium"
+        limiting_factor = "water_level"
+        state_summary = "融雪回水偏高，需防止田面过深积水影响备耕"
+        recommendations = ["视情况开启排灌泵", "检查沟渠畅通", "连续观察 1 至 2 个周期"]
+    elif plot.ph < 6.8 or plot.ph > 7.5:
+        risk_level = "medium"
+        limiting_factor = "ph"
+        state_summary = "早春阶段水体化学性状出现波动，建议继续监测"
+        recommendations = ["核查传感器状态", "减少额外扰动", "等待下一轮采样复核"]
+    elif plot.feeding_index > 0:
+        risk_level = "medium"
+        limiting_factor = "feeding_plan"
+        state_summary = "当前处于备耕监测期，不建议执行常规投喂"
+        recommendations = ["将投喂指数调回 0", "保持设备待机", "以水位与低温监测为主"]
+    else:
+        recommendations = [
+            "当前以保水、巡田和设备巡检为主",
+            "东北地区三月尚未进入正式插秧与放苗阶段",
+        ]
+
+    plot.risk_level = risk_level
+    plot.limiting_factor = limiting_factor
+    plot.state_summary = state_summary
+    plot.recommendation = recommendations
+    plot.updated_at = now_iso()
+
+
 
 class MemoryStore:
     def __init__(self) -> None:
