@@ -51,6 +51,44 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat()
 
 
+def round_for_display(value: Any, digits: int = 1) -> Any:
+    if value is None:
+        return None
+
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if math.isnan(numeric) or math.isinf(numeric):
+            return None
+        if isinstance(value, int):
+            return value
+        return round(numeric, digits)
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, dict):
+        return {k: round_for_display(v, digits) for k, v in value.items()}
+
+    if isinstance(value, (list, tuple, deque)):
+        return [round_for_display(v, digits) for v in value]
+
+    if hasattr(value, "__dataclass_fields__"):
+        return round_for_display(asdict(value), digits)
+
+    return value
+
+
+def serialize_plot(plot: "PlotState") -> dict[str, Any]:
+    return round_for_display(asdict(plot))
+
+
+def serialize_device(device: "DeviceState") -> dict[str, Any]:
+    return round_for_display(asdict(device))
+
+
 class CommandRequest(BaseModel):
     plot_id: str
     device_id: str
