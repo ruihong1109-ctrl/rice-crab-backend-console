@@ -236,11 +236,11 @@ class MemoryStore:
     def append_history(self, plot: PlotState) -> None:
         item = {
             "ts": now_iso(),
-            "water_temp": round(plot.water_temp, 2),
-            "dissolved_oxygen": round(plot.dissolved_oxygen, 2),
-            "ph": round(plot.ph, 2),
-            "ammonia_n": round(plot.ammonia_n, 3),
-            "water_level": round(plot.water_level, 2),
+            "water_temp": round(plot.water_temp, 1),
+            "dissolved_oxygen": round(plot.dissolved_oxygen, 1),
+            "ph": round(plot.ph, 1),
+            "ammonia_n": round(plot.ammonia_n, 1),
+            "water_level": round(plot.water_level, 1),
             "risk_level": plot.risk_level,
             "phenology_stage": plot.phenology_stage,
         }
@@ -258,17 +258,17 @@ class MemoryStore:
             "online_device_count": sum(1 for d in self.devices.values() if d.online),
             "open_alarm_count": sum(1 for a in self.alarms if a["status"] == "open"),
             "risk_counts": risk_counts,
-            "latest_alarm": latest_alarm,
+            "latest_alarm": round_for_display(latest_alarm),
             "season_profile": "东北三月备耕仿真",
         }
 
     def build_plot_payload(self, plot_id: str) -> dict[str, Any]:
         plot = self.plots[plot_id]
-        devices = [asdict(d) for d in self.devices.values() if d.plot_id == plot_id]
+        devices = [serialize_device(d) for d in self.devices.values() if d.plot_id == plot_id]
         return {
-            "plot": asdict(plot),
+            "plot": serialize_plot(plot),
             "devices": devices,
-            "latest_alarms": [a for a in reversed(self.alarms) if a["plot_id"] == plot_id][:8],
+            "latest_alarms": round_for_display([a for a in reversed(self.alarms) if a["plot_id"] == plot_id][:8]),
             "latest_history": list(self.telemetry_history[plot_id])[-60:],
         }
 
@@ -282,11 +282,11 @@ class MemoryStore:
             "state_summary": plot.state_summary,
             "recommended_action": plot.recommendation,
             "metrics": {
-                "water_temp": round(plot.water_temp, 2),
-                "dissolved_oxygen": round(plot.dissolved_oxygen, 2),
-                "ph": round(plot.ph, 2),
-                "ammonia_n": round(plot.ammonia_n, 3),
-                "water_level": round(plot.water_level, 2),
+                "water_temp": round(plot.water_temp, 1),
+                "dissolved_oxygen": round(plot.dissolved_oxygen, 1),
+                "ph": round(plot.ph, 1),
+                "ammonia_n": round(plot.ammonia_n, 1),
+                "water_level": round(plot.water_level, 1),
             },
             "season_meta": {
                 "scenario_month": plot.scenario_month,
@@ -406,7 +406,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 async def broadcast(kind: str, payload: dict[str, Any]) -> None:
     if not store.ws_clients:
         return
-    text = json.dumps({"type": kind, "payload": payload}, ensure_ascii=False)
+    text = json.dumps({"type": kind, "payload": round_for_display(payload)}, ensure_ascii=False)
     disconnected: list[WebSocket] = []
     for ws in store.ws_clients:
         try:
@@ -453,7 +453,7 @@ async def get_summary() -> dict[str, Any]:
 
 @app.get("/api/v1/plots")
 async def list_plots() -> dict[str, Any]:
-    return {"items": [asdict(p) for p in store.plots.values()]}
+    return {"items": [serialize_plot(p) for p in store.plots.values()]}
 
 
 @app.get("/api/v1/plots/{plot_id}")
@@ -490,7 +490,7 @@ async def get_water_quality_state(plot_id: str) -> dict[str, Any]:
 
 @app.get("/api/v1/devices")
 async def list_devices(plot_id: str | None = None) -> dict[str, Any]:
-    items = [asdict(d) for d in store.devices.values() if plot_id is None or d.plot_id == plot_id]
+    items = [serialize_device(d) for d in store.devices.values() if plot_id is None or d.plot_id == plot_id]
     return {"items": items}
 
 
@@ -501,15 +501,15 @@ async def get_device_shadow(device_id: str) -> dict[str, Any]:
     device = store.devices[device_id]
     return {
         "device_id": device_id,
-        "reported_state": device.reported_state,
-        "desired_state": device.desired_state,
+        "reported_state": round_for_display(device.reported_state),
+        "desired_state": round_for_display(device.desired_state),
         "updated_at": device.updated_at,
     }
 
 
 @app.get("/api/v1/alarms")
 async def list_alarms(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
-    return {"items": list(reversed(store.alarms))[:limit]}
+    return {"items": round_for_display(list(reversed(store.alarms))[:limit])}
 
 
 @app.post("/api/v1/commands")
@@ -517,14 +517,14 @@ async def create_command(req: CommandRequest) -> dict[str, Any]:
     item = store.upsert_command(req)
     asyncio.create_task(simulate_command_execution(item["command_id"]))
     await broadcast("command_created", item)
-    return item
+    return round_for_display(item)
 
 
 @app.get("/api/v1/commands/{command_id}")
 async def get_command(command_id: str) -> dict[str, Any]:
     if command_id not in store.commands:
         raise HTTPException(status_code=404, detail="command not found")
-    return store.commands[command_id]
+    return round_for_display(store.commands[command_id])
 
 
 @app.post("/api/v1/commands/{command_id}/cancel")
@@ -655,17 +655,17 @@ async def maybe_emit_alarm(plot: PlotState) -> None:
         should_alarm = True
         severity = "major"
         title = "低温回落风险"
-        detail = {"water_temp": round(plot.water_temp, 2), "phenology_stage": plot.phenology_stage}
+        detail = {"water_temp": round(plot.water_temp, 1), "phenology_stage": plot.phenology_stage}
     elif plot.water_level > 14.5:
         should_alarm = True
         severity = "warn"
         title = "融雪回水偏高"
-        detail = {"water_level": round(plot.water_level, 2)}
+        detail = {"water_level": round(plot.water_level, 1)}
     elif plot.ph < 6.8 or plot.ph > 7.5:
         should_alarm = True
         severity = "warn"
         title = "pH 波动超出预期"
-        detail = {"ph": round(plot.ph, 2)}
+        detail = {"ph": round(plot.ph, 1)}
 
     if should_alarm:
         recent_same = [a for a in reversed(store.alarms) if a["plot_id"] == plot.plot_id and a["title"] == title]
@@ -718,13 +718,13 @@ def sync_devices_from_plot(plot: PlotState) -> None:
         if device.plot_id != plot.plot_id:
             continue
         if device.device_id == "dev-do-001":
-            device.reported_state = {"dissolved_oxygen": round(plot.dissolved_oxygen, 2)}
+            device.reported_state = {"dissolved_oxygen": round(plot.dissolved_oxygen, 1)}
         elif device.device_id == "dev-water-001":
             device.reported_state = {
-                "water_temp": round(plot.water_temp, 2),
-                "ph": round(plot.ph, 2),
-                "ammonia_n": round(plot.ammonia_n, 3),
-                "water_level": round(plot.water_level, 2),
+                "water_temp": round(plot.water_temp, 1),
+                "ph": round(plot.ph, 1),
+                "ammonia_n": round(plot.ammonia_n, 1),
+                "water_level": round(plot.water_level, 1),
             }
         elif device.device_id == "dev-weather-001":
             air_temp = round(plot.water_temp + random.uniform(-1.8, 2.2), 1)
